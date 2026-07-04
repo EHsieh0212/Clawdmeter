@@ -4,6 +4,7 @@
 
 enum screen_t {
     SCREEN_SPLASH,
+    SCREEN_LYRICS,
     SCREEN_USAGE,
     SCREEN_COUNT,
 };

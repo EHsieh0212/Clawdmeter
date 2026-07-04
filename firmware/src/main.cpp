@@ -8,6 +8,7 @@
 #include "ui.h"
 #include "ble.h"
 #include "splash.h"
+#include "lyrics.h"
 #include "usage_rate.h"
 #include "idle.h"
 #include "idle_cfg.h"
@@ -229,6 +230,7 @@ void setup() {
     input_hal_init();
 
     ui_init();
+    lyrics_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
     ui_show_screen(SCREEN_SPLASH);
@@ -287,6 +289,7 @@ static void pair_tick(void) {
 
 void loop() {
     idle_tick();
+    lyrics_tick();
     lv_timer_handler();
     ui_tick_anim();
     ble_tick();
