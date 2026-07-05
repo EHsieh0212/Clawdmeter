@@ -1,4 +1,4 @@
- #!/bin/bash
+#!/bin/bash
 # Build and flash Clawdmeter firmware on macOS.
 # Usage:
 #   ./flash-mac.sh <board>                       # auto-detect /dev/cu.usbmodem*
