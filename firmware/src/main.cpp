@@ -8,6 +8,7 @@
 #include "ui.h"
 #include "ble.h"
 #include "splash.h"
+#include "lyrics.h"
 #include "usage_rate.h"
 #include "idle.h"
 #include "idle_cfg.h"
@@ -124,6 +125,57 @@ static bool parse_json(const char* json, UsageData* out) {
     return true;
 }
 
+// Apply a parsed usage payload: rate bookkeeping, reset chime, splash rate
+// animation, and the UI update + ack. Split out so the BLE dispatcher can call
+// it after routing lyrics messages elsewhere.
+static void apply_usage(void) {
+    int g_before = usage_rate_group();
+    bool session_reset = usage_rate_sample(usage.session_pct);
+    int g_after = usage_rate_group();
+    // 5-hour session limit refilled → chime so the user knows they can use
+    // Claude again (no-op on boards without a buzzer). Gated on the daemon's
+    // opt-in `chime` config; the `buzz` serial cmd ignores it.
+    if (session_reset && usage.chime) {
+        Serial.println("session reset detected — chime");
+        sound_hal_play_reset();
+    }
+    if (g_after != g_before) {
+        Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
+            g_before, g_after, usage.session_pct);
+        if (splash_is_active()) splash_pick_for_current_rate();
+    }
+    ui_update(&usage);
+}
+
+// Route one BLE RX message. Lyrics messages carry an "ly" type tag (h=header,
+// l=line, p=position, x=nothing playing) and feed the lyrics module; anything
+// else is a usage payload. See docs/lyrics-design and lyrics.h.
+static void handle_ble_message(const char* json) {
+    JsonDocument doc;
+    if (deserializeJson(doc, json)) {
+        Serial.println("BLE: JSON parse error");
+        return;
+    }
+    const char* ly = doc["ly"] | (const char*)nullptr;
+    if (ly) {
+        uint32_t id = doc["id"] | 0UL;
+        switch (ly[0]) {
+        case 'h': lyrics_ingest_header(id, doc["n"] | 0, doc["tr"] | "", doc["ar"] | ""); break;
+        case 'l': lyrics_ingest_line(id, doc["i"] | 0, doc["ms"] | 0UL, doc["x"] | ""); break;
+        case 'p': lyrics_ingest_pos(id, doc["ms"] | 0UL, doc["pl"] | true); break;
+        case 'x': lyrics_ingest_none(); break;
+        default:  Serial.printf("lyrics: unknown ly=%s\n", ly); break;
+        }
+        return;   // lyrics stream is unacked (would flood on a per-line basis)
+    }
+    if (parse_json(json, &usage)) {
+        apply_usage();
+        ble_send_ack();
+    } else {
+        ble_send_nack();
+    }
+}
+
 // ---- Serial command buffer ----
 #define CMD_BUF_SIZE 64
 static char cmd_buf[CMD_BUF_SIZE];
@@ -174,6 +226,16 @@ static void check_serial_cmd() {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
             else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
+            else if (strcmp(cmd_buf, "lyrdemo") == 0) {   // inject demo song + show lyrics
+                lyrics_load_demo();
+                ui_show_screen(SCREEN_LYRICS);
+            }
+            else if (strcmp(cmd_buf, "lyrstop") == 0) {   // simulate pause
+                lyrics_ingest_none();
+            }
+            else if (strcmp(cmd_buf, "lyrplay") == 0) {   // simulate resume (pos only, no re-push)
+                lyrics_ingest_pos(LYRICS_DEMO_ID, 45000, true);
+            }
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -229,9 +291,10 @@ void setup() {
     input_hal_init();
 
     ui_init();
+    lyrics_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
-    ui_show_screen(SCREEN_SPLASH);
+    ui_show_screen(SCREEN_LYRICS);   // boot into the Spotify page (breathing logo until music plays)
 
     Serial.printf("Dashboard ready (%s, %dx%d), waiting for data on BLE...\n",
         board_caps().name, W, H);
@@ -287,6 +350,7 @@ static void pair_tick(void) {
 
 void loop() {
     idle_tick();
+    lyrics_tick();
     lv_timer_handler();
     ui_tick_anim();
     ble_tick();
@@ -369,28 +433,10 @@ void loop() {
 
     check_serial_cmd();
 
-    if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
-            int g_before = usage_rate_group();
-            bool session_reset = usage_rate_sample(usage.session_pct);
-            int g_after = usage_rate_group();
-            // 5-hour session limit refilled → chime so the user knows they can
-            // use Claude again (no-op on boards without a buzzer). Gated on the
-            // daemon's opt-in `chime` config; the `buzz` serial cmd ignores it.
-            if (session_reset && usage.chime) {
-                Serial.println("session reset detected — chime");
-                sound_hal_play_reset();
-            }
-            if (g_after != g_before) {
-                Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
-                if (splash_is_active()) splash_pick_for_current_rate();
-            }
-            ui_update(&usage);
-            ble_send_ack();
-        } else {
-            ble_send_nack();
-        }
+    // Drain every queued RX message this loop — a lyrics stream arrives as a
+    // burst of writes, so a single dequeue per loop would fall behind.
+    while (ble_has_data()) {
+        handle_ble_message(ble_get_data());
     }
 
     delay(5);

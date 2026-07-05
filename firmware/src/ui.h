@@ -2,9 +2,12 @@
 #include "data.h"
 #include "ble.h"
 
+// Tap cycles in this order (boot lands on the first): the Spotify lyrics page,
+// the usage dashboard, then the Claude pixel-art animation, and back around.
 enum screen_t {
-    SCREEN_SPLASH,
+    SCREEN_LYRICS,
     SCREEN_USAGE,
+    SCREEN_SPLASH,
     SCREEN_COUNT,
 };
 

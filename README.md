@@ -307,3 +307,43 @@ See `tools/README.md` for details.
 ## Licensing gray area warning
 
 The software in this repository uses and adheres to the Anthropic brand guidelines and uses the same proprietary fonts that Anthropic has a license for but this software uses without permission as well as using assets from Anthropic such as the copyrighted Clawd mascot so even though the code in this repo is non-proprietary I will not license it myself under a copyleft license since this repo includes proprietary fonts and copyrighted assets. Please be aware of this if you fork or copy the code from this repo. **You have been warned!**
+
+## Troubleshooting — no data on the device
+
+The device shows nothing on its own; a daemon on the Mac feeds it over BLE (usage
+data from `claude_usage_daemon.py`, Spotify lyrics from `lyrics_daemon.py`). When a
+screen has no data, **read the daemon log first — it tells you which problem it is.**
+Don't just re-login every time.
+
+### 1. Read the log
+
+```bash
+tail -20 ~/Library/Logs/claude-usage-daemon.out.log      # usage
+tail -20 ~/Library/Logs/clawdmeter-lyrics.out.log        # lyrics
+```
+
+| What the log shows | Cause | Fix |
+| --- | --- | --- |
+| `401` / `authentication_error` / `Invalid authentication credentials` | Claude Code OAuth token expired | Re-login in Claude Code (`/login`), then restart the daemon |
+| `Device disconnected`, or `Connecting…` retrying forever | BLE dropped | Make sure the board is powered and nearby; restart the daemon |
+| Log frozen long ago / daemon not in `launchctl list` | Daemon crashed | Restart the daemon |
+| `Sending: {…"ok":true}` keeps appearing but the device is blank | Data is being sent — the problem is on the device | Tap to the right screen; power-cycle the board |
+
+### 2. Check the daemon is alive
+
+```bash
+launchctl list | grep -E 'claude-usage-daemon|clawdmeter-lyrics'   # PID in col 1 = running
+```
+
+### 3. Restart a daemon (fixes most cases)
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.user.claude-usage-daemon   # usage
+launchctl kickstart -k gui/$(id -u)/com.user.clawdmeter-lyrics     # lyrics
+```
+
+### Which side is it?
+
+- Only the **usage** screen is blank → usage daemon / token (nothing to do with Spotify).
+- Only the **lyrics** screen is stuck → lyrics daemon / Spotify.
+- **Both** blank → most likely BLE, or the board is off.

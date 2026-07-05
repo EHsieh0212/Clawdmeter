@@ -1,9 +1,12 @@
 #include "ui.h"
 #include "splash.h"
+#include "lyrics.h"
 #include <lvgl.h>
 #include <time.h>
 #include "logo.h"
 #include "icons.h"
+#include "icon_spotify.h"
+#include "icon_spotify_big.h"
 #include "hal/board_caps.h"
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
@@ -126,6 +129,21 @@ static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
 static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
 static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / "Over pace"
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
+
+// ---- Lyrics screen widgets (karaoke: current line huge + centered) ----
+static lv_obj_t* lyrics_container;
+static lv_obj_t* spotify_img;     // Spotify logo, top-left (replaces Claude logo here)
+static lv_image_dsc_t spotify_dsc;
+static lv_obj_t* spotify_big_img;  // large centered Spotify logo — shown when idle/paused
+static lv_image_dsc_t spotify_big_dsc;
+static lv_obj_t* lbl_lyr_track;   // track name (accent), top
+static lv_obj_t* lbl_lyr_artist;  // artist (dim), just below track
+static lv_obj_t* lyr_col;         // flex column holding the three lyric lines
+static lv_obj_t* lbl_lyr_prev;    // previous line, dim, above current
+static lv_obj_t* lbl_lyr_cur;     // current line, bright + large, centered
+static lv_obj_t* lbl_lyr_next;    // next line, dim, below current
+static int       lyr_last_index = -2;  // last rendered line index; -2 forces redraw
+static int       lyr_last_idle  = -1;  // last idle state (0/1); -1 forces redraw
 
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
@@ -440,6 +458,168 @@ static void init_usage_screen(lv_obj_t* scr) {
 
 // ======== Public API ========
 
+// Breathing-pulse animation for the idle Spotify logo: a slow scale + opacity
+// throb driven by LVGL's animation engine (runs off lv_timer_handler). The
+// image is baked at 100% and only ever scaled DOWN, so it stays crisp.
+static void spotify_pulse_scale_cb(void* obj, int32_t v) {
+    lv_image_set_scale((lv_obj_t*)obj, (uint16_t)v);
+}
+static void spotify_pulse_opa_cb(void* obj, int32_t v) {
+    lv_obj_set_style_image_opa((lv_obj_t*)obj, (lv_opa_t)v, 0);
+}
+static void start_spotify_pulse(lv_obj_t* img) {
+    lv_image_set_pivot(img, ICON_SPOTIFY_BIG_WIDTH / 2, ICON_SPOTIFY_BIG_HEIGHT / 2);
+
+    lv_anim_t a;                              // scale: 85% <-> 100%
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, img);
+    lv_anim_set_exec_cb(&a, spotify_pulse_scale_cb);
+    lv_anim_set_values(&a, 218, 256);
+    lv_anim_set_duration(&a, 1600);
+    lv_anim_set_playback_duration(&a, 1600);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_start(&a);
+
+    lv_anim_t o;                              // opacity: 60% <-> 100%
+    lv_anim_init(&o);
+    lv_anim_set_var(&o, img);
+    lv_anim_set_exec_cb(&o, spotify_pulse_opa_cb);
+    lv_anim_set_values(&o, 150, 255);
+    lv_anim_set_duration(&o, 1600);
+    lv_anim_set_playback_duration(&o, 1600);
+    lv_anim_set_repeat_count(&o, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&o, lv_anim_path_ease_in_out);
+    lv_anim_start(&o);
+}
+
+// Karaoke lyrics screen: a track/artist header up top, and a vertically
+// centered column of three lines — the previous line (dim), the current line
+// (large + bright), and the next line (dim). The flex column re-centers itself
+// as line heights change with wrapping, so the current line always sits at the
+// optical middle of the panel. When nothing is playing it shows a large,
+// gently breathing Spotify logo instead.
+static void init_lyrics_screen(lv_obj_t* scr) {
+    lyrics_container = lv_obj_create(scr);
+    lv_obj_set_size(lyrics_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(lyrics_container, 0, 0);
+    lv_obj_set_style_bg_color(lyrics_container, COL_BG, 0);
+    lv_obj_set_style_bg_opa(lyrics_container, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(lyrics_container, 0, 0);
+    lv_obj_set_style_radius(lyrics_container, 0, 0);
+    lv_obj_set_style_pad_all(lyrics_container, 0, 0);
+    lv_obj_clear_flag(lyrics_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(lyrics_container, global_click_cb, LV_EVENT_CLICKED, NULL);
+
+    // Spotify logo, top-left, in the same slot the Claude logo uses on other
+    // screens. A child of lyrics_container, so it shows/hides with the page.
+    init_icon_dsc_rgb565a8(&spotify_dsc, ICON_SPOTIFY_WIDTH, ICON_SPOTIFY_HEIGHT,
+                           icon_spotify_data);
+    spotify_img = lv_image_create(lyrics_container);
+    lv_image_set_src(spotify_img, &spotify_dsc);
+    lv_obj_set_pos(spotify_img, L.margin, L.title_y - 10);
+
+    // Track / artist header on two lines, centered between the logo
+    // (top-left) and battery (top-right); narrowed so it never collides with
+    // either. Two lines avoids needing a separator glyph the Latin-subset font
+    // doesn't carry.
+    lbl_lyr_track = lv_label_create(lyrics_container);
+    lv_label_set_long_mode(lbl_lyr_track, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(lbl_lyr_track, L.content_w - 140);
+    lv_obj_set_style_text_align(lbl_lyr_track, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(lbl_lyr_track, &font_styrene_20, 0);
+    lv_obj_set_style_text_color(lbl_lyr_track, COL_ACCENT, 0);
+    lv_obj_align(lbl_lyr_track, LV_ALIGN_TOP_MID, 0, L.title_y - 4);
+    lv_label_set_text(lbl_lyr_track, "");
+
+    lbl_lyr_artist = lv_label_create(lyrics_container);
+    lv_label_set_long_mode(lbl_lyr_artist, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(lbl_lyr_artist, L.content_w - 140);
+    lv_obj_set_style_text_align(lbl_lyr_artist, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(lbl_lyr_artist, &font_styrene_16, 0);
+    lv_obj_set_style_text_color(lbl_lyr_artist, COL_DIM, 0);
+    lv_obj_align_to(lbl_lyr_artist, lbl_lyr_track, LV_ALIGN_OUT_BOTTOM_MID, 0, 4);
+    lv_label_set_text(lbl_lyr_artist, "");
+
+    // Center column holding prev / current / next.
+    lyr_col = lv_obj_create(lyrics_container);
+    lv_obj_set_size(lyr_col, L.content_w, L.scr_h - L.content_y);
+    lv_obj_align(lyr_col, LV_ALIGN_BOTTOM_MID, 0, -24);
+    lv_obj_set_style_bg_opa(lyr_col, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(lyr_col, 0, 0);
+    lv_obj_set_style_pad_all(lyr_col, 0, 0);
+    lv_obj_clear_flag(lyr_col, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(lyr_col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(lyr_col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(lyr_col, 20, 0);
+
+    struct { lv_obj_t** slot; const lv_font_t* font; lv_color_t col; lv_opa_t opa; }
+    rows[] = {
+        { &lbl_lyr_prev, &font_styrene_20, COL_DIM,  LV_OPA_40  },
+        { &lbl_lyr_cur,  &font_styrene_48, COL_TEXT, LV_OPA_COVER },
+        { &lbl_lyr_next, &font_styrene_20, COL_DIM,  LV_OPA_40  },
+    };
+    for (auto& r : rows) {
+        lv_obj_t* l = lv_label_create(lyr_col);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(l, L.content_w);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(l, r.font, 0);
+        lv_obj_set_style_text_color(l, r.col, 0);
+        lv_obj_set_style_text_opa(l, r.opa, 0);
+        lv_label_set_text(l, "");
+        *r.slot = l;
+    }
+
+    // Large centered Spotify logo — the idle/paused state (nothing playing).
+    init_icon_dsc_rgb565a8(&spotify_big_dsc, ICON_SPOTIFY_BIG_WIDTH,
+                           ICON_SPOTIFY_BIG_HEIGHT, icon_spotify_big_data);
+    spotify_big_img = lv_image_create(lyrics_container);
+    lv_image_set_src(spotify_big_img, &spotify_big_dsc);
+    lv_obj_center(spotify_big_img);
+    lv_obj_add_flag(spotify_big_img, LV_OBJ_FLAG_HIDDEN);
+    start_spotify_pulse(spotify_big_img);   // gentle breathing while idle
+
+    lv_obj_add_flag(lyrics_container, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Refresh the lyrics page. Two states: playing → the karaoke lines + header +
+// small logo; idle (paused / nothing playing) → a large centered Spotify logo.
+// Cheap to call every tick; the labels only change when the line index moves.
+static void lyrics_render(void) {
+    if (!lyrics_container) return;
+
+    int idle = (!lyrics_available() || !lyrics_is_playing()) ? 1 : 0;
+    if (idle != lyr_last_idle) {
+        lyr_last_idle = idle;
+        // Toggle the playing widgets vs the big idle logo.
+        lv_obj_t* playing_parts[] = { spotify_img, lbl_lyr_track, lbl_lyr_artist, lyr_col };
+        for (lv_obj_t* o : playing_parts) {
+            if (idle) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+            else      lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (idle) lv_obj_clear_flag(spotify_big_img, LV_OBJ_FLAG_HIDDEN);
+        else      lv_obj_add_flag(spotify_big_img, LV_OBJ_FLAG_HIDDEN);
+        lyr_last_index = -2;   // force a line redraw when playback resumes
+    }
+    if (idle) return;
+
+    lv_label_set_text(lbl_lyr_track,  lyrics_track());
+    lv_label_set_text(lbl_lyr_artist, lyrics_artist());
+
+    int idx = lyrics_current_index();
+    if (idx == lyr_last_index) return;
+    lyr_last_index = idx;
+
+    const char* prev = (idx - 1 >= 0) ? lyrics_line(idx - 1) : "";
+    const char* cur  = (idx >= 0)     ? lyrics_line(idx)     : "";
+    const char* next = lyrics_line(idx + 1);
+    lv_label_set_text(lbl_lyr_prev, prev ? prev : "");
+    lv_label_set_text(lbl_lyr_cur,  (cur && cur[0]) ? cur : "");   // empty before the first line
+    lv_label_set_text(lbl_lyr_next, next ? next : "");
+}
+
 void ui_init(void) {
     compute_layout(board_caps());
 
@@ -451,6 +631,7 @@ void ui_init(void) {
     init_battery_icons();
 
     init_usage_screen(scr);
+    init_lyrics_screen(scr);
     splash_init(scr);
 
     if (splash_get_root()) {
@@ -574,6 +755,12 @@ static void update_view_state(void) {
 }
 
 void ui_tick_anim(void) {
+    if (current_screen == SCREEN_LYRICS) {
+        // The page renders its own idle state (a big Spotify logo) when nothing
+        // is playing, so it stays put rather than bouncing to the gif.
+        lyrics_render();
+        return;
+    }
     if (current_screen != SCREEN_USAGE) return;
     update_view_state();
     if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
@@ -640,23 +827,36 @@ static void apply_battery_visibility(void) {
 
 static void global_click_cb(lv_event_t* e) {
     (void)e;
-    if (current_screen == SCREEN_SPLASH) ui_show_screen(prev_non_splash_screen);
-    else                                  ui_show_screen(SCREEN_SPLASH);
+    // Tap cycles forward through the screens: splash (gif) -> lyrics (Spotify) ->
+    // usage -> back to splash. The lyrics page is always in the rotation; when
+    // nothing plays it shows the big Spotify logo.
+    ui_show_screen((screen_t)((current_screen + 1) % SCREEN_COUNT));
 }
 
 void ui_show_screen(screen_t screen) {
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+    if (lyrics_container) lv_obj_add_flag(lyrics_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
     switch (screen) {
     case SCREEN_SPLASH:  splash_show(); break;
     case SCREEN_USAGE:   lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN); break;
+    case SCREEN_LYRICS:
+        lyr_last_index = -2;   // force a redraw of the lines on entry
+        lyr_last_idle  = -1;   // force the idle/playing visibility toggle
+        lv_obj_clear_flag(lyrics_container, LV_OBJ_FLAG_HIDDEN);
+        lyrics_render();
+        break;
     default: break;
     }
 
     if (logo_img) {
-        if (screen == SCREEN_SPLASH) lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
-        else                          lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        // Claude logo shows on the usage screen only. Splash hides it; the
+        // lyrics screen shows the Spotify logo in its place instead.
+        if (screen == SCREEN_SPLASH || screen == SCREEN_LYRICS)
+            lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
     }
 
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
