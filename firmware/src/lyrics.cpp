@@ -1,115 +1,177 @@
 #include "lyrics.h"
 #include <Arduino.h>
+#include <string.h>
 
 // ---------------------------------------------------------------------------
-// Phase 1: hard-coded sample track + fake playback clock.
-//
-// Real synced lyrics for Maroon 5 — "This Love" (from LRCLIB), so the layout is
-// exercised against genuine line lengths and timing. Phase 2 replaces the block
-// below with lyrics reassembled from BLE chunks; nothing else in this file's
-// public surface changes.
+// Lyrics state. Fixed-size storage (no dynamic allocation): on the S3 this sits
+// in PSRAM-backed BSS comfortably; the whole buffer is ~9.6 KB. A C6 port would
+// need to shrink LYRICS_MAX_LINES to fit internal SRAM.
 // ---------------------------------------------------------------------------
 
-static const char* SAMPLE_TRACK  = "This Love";
-static const char* SAMPLE_ARTIST = "Maroon 5";
+static char     g_track[LYRICS_MAX_NAME];
+static char     g_artist[LYRICS_MAX_NAME];
+static uint32_t g_track_id;                 // 0 = none
+static uint16_t g_n_lines;                  // total lines the header promised
+static uint16_t g_n_received;               // contiguous lines stored so far
+static uint32_t g_line_ms[LYRICS_MAX_LINES];
+static char     g_line_text[LYRICS_MAX_LINES][LYRICS_MAX_LINE];
+static bool     g_have_header;
 
-static const LyricLine SAMPLE_LINES[] = {
-    {  20330, "I was so high, I did not recognize" },
-    {  23980, "The fire burning in her eyes" },
-    {  26560, "The chaos that controlled my mind" },
-    {  30520, "Whispered goodbye as she got on a plane" },
-    {  34170, "Never to return again but always in my heart, oh" },
-    {  41020, "This love has taken its toll on me" },
-    {  45360, "She said goodbye too many times before" },
-    {  50900, "And her heart is breakin' in front of me" },
-    {  55470, "And I have no choice" },
-    {  57730, "'Cause I won't say goodbye anymore" },
-    {  62360, "Whoa" },
-    {  64660, "Whoa" },
-    {  67210, "Whoa" },
-    {  71190, "I tried my best to feed her appetite" },
-    {  74530, "Keep her coming every night" },
-    {  76930, "So hard to keep her satisfied, oh" },
-    {  80870, "Kept playing love like it was just a game" },
-    {  84320, "Pretending to feel the same" },
-    {  86930, "Then turn around and leave again, but uh-oh" },
-    {  91539, "This love has taken its toll on me" },
-    {  95830, "She said goodbye too many times before" },
-    { 101490, "And her heart is breakin' in front of me" },
-    { 105990, "And I have no choice" },
-    { 108289, "'Cause I won't say goodbye anymore" },
-    { 121140, "I'll fix these broken things, repair your broken wings" },
-    { 126440, "And make sure everything's all right" },
-    { 131520, "My pressure on your hips, I'm sinking my fingertips" },
-    { 136470, "Every inch of you" },
-    { 138280, "Because I know that's what you want me to do" },
-    { 142100, "This love has taken its toll on me" },
-    { 146340, "She said goodbye too many times before" },
-    { 152100, "Her heart is breakin' in front of me" },
-    { 156570, "And I have no choice" },
-    { 158660, "'Cause I won't say goodbye anymore" },
-    { 182630, "This love has taken its toll on me" },
-    { 186900, "She said goodbye too many times before" },
-    { 192320, "And her heart is breakin' in front of me" },
-    { 196930, "And I have no choice" },
-    { 198940, "'Cause I won't say goodbye anymore" },
-};
-#define SAMPLE_COUNT ((int)(sizeof(SAMPLE_LINES) / sizeof(SAMPLE_LINES[0])))
-#define SAMPLE_DURATION_MS 206000u
+// Playback position: last reported position captured at a base millis(),
+// advanced locally between updates. `g_loop_ms` is non-zero only for the demo
+// (so it repeats); real playback leaves it 0 and refreshes the base on every
+// position message.
+static uint32_t g_base_ms;
+static uint32_t g_base_millis;
+static bool     g_playing;
+static uint32_t g_loop_ms;
 
-// Playback position, interpolated locally. In Phase 1 `base_ms`/`base_millis`
-// are seeded once and advanced purely from millis(); in Phase 2 they are
-// refreshed by every `lp` position message from the host.
-static uint32_t base_ms     = 0;
-static uint32_t base_millis = 0;
-static bool     playing     = true;
-
-// Where the fake clock starts, so the very first screenshot lands mid-verse on
-// a long line (good for checking wrap) rather than on the pre-intro silence.
-#define FAKE_START_MS 30000u
+static void reset_track(void) {
+    g_track[0] = '\0';
+    g_artist[0] = '\0';
+    g_track_id = 0;
+    g_n_lines = 0;
+    g_n_received = 0;
+    g_have_header = false;
+    g_base_ms = 0;
+    g_base_millis = millis();
+    g_playing = false;
+    g_loop_ms = 0;
+}
 
 void lyrics_init(void) {
-    base_ms     = FAKE_START_MS;
-    base_millis = millis();
-    playing     = true;
+    reset_track();
 }
 
 void lyrics_tick(void) {
-    // Phase 1: nothing to do — position is derived on read from millis().
-    // Phase 2 will consume queued `lp` messages here to refresh base_ms.
+    // Position is derived on read from millis(); nothing to advance here.
 }
 
+// --- Ingest -----------------------------------------------------------------
+
+void lyrics_ingest_header(uint32_t id, uint16_t n_lines,
+                          const char* track, const char* artist) {
+    reset_track();
+    g_track_id = id;
+    g_n_lines = (n_lines > LYRICS_MAX_LINES) ? LYRICS_MAX_LINES : n_lines;
+    if (n_lines > LYRICS_MAX_LINES)
+        Serial.printf("lyrics: truncating %u lines to %u\n", n_lines, LYRICS_MAX_LINES);
+    strlcpy(g_track,  track  ? track  : "", sizeof(g_track));
+    strlcpy(g_artist, artist ? artist : "", sizeof(g_artist));
+    g_have_header = true;
+    g_playing = true;   // a fresh song implies playback; a pos msg refines this
+    g_base_millis = millis();
+}
+
+void lyrics_ingest_line(uint32_t id, uint16_t idx, uint32_t ms, const char* text) {
+    if (!g_have_header || id != g_track_id) return;   // stale / unknown track
+    if (idx >= g_n_lines || idx >= LYRICS_MAX_LINES) return;
+    g_line_ms[idx] = ms;
+    strlcpy(g_line_text[idx], text ? text : "", LYRICS_MAX_LINE);
+    // Lines stream in order; advance the contiguous-received count.
+    if (idx == g_n_received) {
+        g_n_received++;
+        while (g_n_received < g_n_lines && g_line_text[g_n_received][0] != '\0'
+               && g_line_ms[g_n_received] != 0)
+            g_n_received++;
+    } else if (idx + 1 > g_n_received) {
+        g_n_received = idx + 1;   // gap (dropped write): best-effort
+    }
+}
+
+void lyrics_ingest_pos(uint32_t id, uint32_t ms, bool playing) {
+    if (g_have_header && id != g_track_id) return;   // position for another track
+    g_base_ms = ms;
+    g_base_millis = millis();
+    g_playing = playing;
+    g_loop_ms = 0;   // real playback: no wraparound
+}
+
+void lyrics_ingest_none(void) {
+    // Host reports nothing playing → drop out of the lyrics view.
+    g_playing = false;
+    g_have_header = false;
+}
+
+// --- Query ------------------------------------------------------------------
+
 static uint32_t playback_pos_ms(void) {
-    uint32_t pos = base_ms;
-    if (playing) pos += (millis() - base_millis);
-    // Loop the sample so the demo keeps scrolling.
-    if (SAMPLE_DURATION_MS) pos %= SAMPLE_DURATION_MS;
+    uint32_t pos = g_base_ms;
+    if (g_playing) pos += (millis() - g_base_millis);
+    if (g_loop_ms) pos %= g_loop_ms;
     return pos;
 }
 
 bool lyrics_available(void) {
-    return SAMPLE_COUNT > 0;
+    return g_have_header && g_n_received > 0;
 }
 
 bool lyrics_is_playing(void) {
-    return playing;
+    return g_playing;
 }
 
-const char* lyrics_track(void)  { return SAMPLE_TRACK; }
-const char* lyrics_artist(void) { return SAMPLE_ARTIST; }
-int         lyrics_count(void)   { return SAMPLE_COUNT; }
+const char* lyrics_track(void)  { return g_track; }
+const char* lyrics_artist(void) { return g_artist; }
+int         lyrics_count(void)   { return g_n_received; }
 
 const char* lyrics_line(int i) {
-    if (i < 0 || i >= SAMPLE_COUNT) return nullptr;
-    return SAMPLE_LINES[i].text;
+    if (i < 0 || i >= (int)g_n_received) return nullptr;
+    return g_line_text[i];
 }
 
 int lyrics_current_index(void) {
     uint32_t pos = playback_pos_ms();
     int idx = -1;
-    for (int i = 0; i < SAMPLE_COUNT; i++) {
-        if (SAMPLE_LINES[i].ms <= pos) idx = i;
+    for (int i = 0; i < (int)g_n_received; i++) {
+        if (g_line_ms[i] <= pos) idx = i;
         else break;
     }
     return idx;
+}
+
+// --- Built-in demo (no BLE) -------------------------------------------------
+// Real synced lyrics for Maroon 5 — "This Love" (from LRCLIB), fed through the
+// same ingest path a BLE stream uses, then driven by a looping local clock.
+
+void lyrics_load_demo(void) {
+    struct { uint32_t ms; const char* text; } S[] = {
+        {  20330, "I was so high, I did not recognize" },
+        {  23980, "The fire burning in her eyes" },
+        {  26560, "The chaos that controlled my mind" },
+        {  30520, "Whispered goodbye as she got on a plane" },
+        {  34170, "Never to return again but always in my heart, oh" },
+        {  41020, "This love has taken its toll on me" },
+        {  45360, "She said goodbye too many times before" },
+        {  50900, "And her heart is breakin' in front of me" },
+        {  55470, "And I have no choice" },
+        {  57730, "'Cause I won't say goodbye anymore" },
+        {  71190, "I tried my best to feed her appetite" },
+        {  74530, "Keep her coming every night" },
+        {  76930, "So hard to keep her satisfied, oh" },
+        {  80870, "Kept playing love like it was just a game" },
+        {  84320, "Pretending to feel the same" },
+        {  86930, "Then turn around and leave again, but uh-oh" },
+        {  91539, "This love has taken its toll on me" },
+        {  95830, "She said goodbye too many times before" },
+        { 101490, "And her heart is breakin' in front of me" },
+        { 105990, "And I have no choice" },
+        { 108289, "'Cause I won't say goodbye anymore" },
+        { 121140, "I'll fix these broken things, repair your broken wings" },
+        { 126440, "And make sure everything's all right" },
+        { 131520, "My pressure on your hips, I'm sinking my fingertips" },
+        { 136470, "Every inch of you" },
+        { 138280, "Because I know that's what you want me to do" },
+    };
+    const int n = (int)(sizeof(S) / sizeof(S[0]));
+    const uint32_t id = 0xDEADBEEF;
+    lyrics_ingest_header(id, n, "This Love", "Maroon 5");
+    for (int i = 0; i < n; i++)
+        lyrics_ingest_line(id, i, S[i].ms, S[i].text);
+    // Looping local clock, starting mid-verse so the first frame lands on a
+    // long line (wrap check).
+    g_base_ms = 30000;
+    g_base_millis = millis();
+    g_playing = true;
+    g_loop_ms = 206000;
+    Serial.printf("lyrics: demo loaded (%d lines)\n", n);
 }

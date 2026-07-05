@@ -64,8 +64,19 @@ static NimBLECharacteristic* req_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
-static char rx_buf[BLE_BUF_SIZE];
-static volatile bool data_ready = false;
+
+// RX message ring. Writes arrive from the NimBLE host task (onWrite); the main
+// loop drains them. A lyrics stream is a burst of write-without-response
+// packets, so a single buffer would drop messages whenever the main loop was
+// busy (e.g. mid-render) between two writes. The ring decouples the two and
+// preserves order; if it ever fills, the oldest message is dropped.
+#define RX_RING_SLOTS 16
+static char rx_ring[RX_RING_SLOTS][BLE_BUF_SIZE];
+static volatile uint8_t rx_head = 0;   // producer writes here
+static volatile uint8_t rx_tail = 0;   // consumer reads here
+static char rx_current[BLE_BUF_SIZE];   // consumer's stable copy
+static portMUX_TYPE rx_mux = portMUX_INITIALIZER_UNLOCKED;
+
 static volatile bool has_received_data = false;
 static char mac_str[18];
 
@@ -230,9 +241,14 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
         }
         std::string val = chr->getValue();
         size_t len = std::min(val.length(), (size_t)(BLE_BUF_SIZE - 1));
-        memcpy(rx_buf, val.c_str(), len);
-        rx_buf[len] = '\0';
-        data_ready = true;
+        portENTER_CRITICAL(&rx_mux);
+        uint8_t next = (rx_head + 1) % RX_RING_SLOTS;
+        if (next == rx_tail)                       // full → drop the oldest
+            rx_tail = (rx_tail + 1) % RX_RING_SLOTS;
+        memcpy(rx_ring[rx_head], val.c_str(), len);
+        rx_ring[rx_head][len] = '\0';
+        rx_head = next;
+        portEXIT_CRITICAL(&rx_mux);
         has_received_data = true;
     }
 };
@@ -350,12 +366,21 @@ bool ble_has_bonds(void) {
 }
 
 bool ble_has_data(void) {
-    return data_ready;
+    return rx_head != rx_tail;
 }
 
+// Dequeue one message into a stable buffer. Valid until the next call.
 const char* ble_get_data(void) {
-    data_ready = false;
-    return rx_buf;
+    portENTER_CRITICAL(&rx_mux);
+    if (rx_head == rx_tail) {
+        portEXIT_CRITICAL(&rx_mux);
+        rx_current[0] = '\0';
+        return rx_current;
+    }
+    strlcpy(rx_current, rx_ring[rx_tail], BLE_BUF_SIZE);
+    rx_tail = (rx_tail + 1) % RX_RING_SLOTS;
+    portEXIT_CRITICAL(&rx_mux);
+    return rx_current;
 }
 
 void ble_send_ack(void) {
