@@ -458,11 +458,47 @@ static void init_usage_screen(lv_obj_t* scr) {
 
 // ======== Public API ========
 
+// Breathing-pulse animation for the idle Spotify logo: a slow scale + opacity
+// throb driven by LVGL's animation engine (runs off lv_timer_handler). The
+// image is baked at 100% and only ever scaled DOWN, so it stays crisp.
+static void spotify_pulse_scale_cb(void* obj, int32_t v) {
+    lv_image_set_scale((lv_obj_t*)obj, (uint16_t)v);
+}
+static void spotify_pulse_opa_cb(void* obj, int32_t v) {
+    lv_obj_set_style_image_opa((lv_obj_t*)obj, (lv_opa_t)v, 0);
+}
+static void start_spotify_pulse(lv_obj_t* img) {
+    lv_image_set_pivot(img, ICON_SPOTIFY_BIG_WIDTH / 2, ICON_SPOTIFY_BIG_HEIGHT / 2);
+
+    lv_anim_t a;                              // scale: 85% <-> 100%
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, img);
+    lv_anim_set_exec_cb(&a, spotify_pulse_scale_cb);
+    lv_anim_set_values(&a, 218, 256);
+    lv_anim_set_duration(&a, 1600);
+    lv_anim_set_playback_duration(&a, 1600);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_start(&a);
+
+    lv_anim_t o;                              // opacity: 60% <-> 100%
+    lv_anim_init(&o);
+    lv_anim_set_var(&o, img);
+    lv_anim_set_exec_cb(&o, spotify_pulse_opa_cb);
+    lv_anim_set_values(&o, 150, 255);
+    lv_anim_set_duration(&o, 1600);
+    lv_anim_set_playback_duration(&o, 1600);
+    lv_anim_set_repeat_count(&o, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&o, lv_anim_path_ease_in_out);
+    lv_anim_start(&o);
+}
+
 // Karaoke lyrics screen: a track/artist header up top, and a vertically
 // centered column of three lines — the previous line (dim), the current line
 // (large + bright), and the next line (dim). The flex column re-centers itself
 // as line heights change with wrapping, so the current line always sits at the
-// optical middle of the panel.
+// optical middle of the panel. When nothing is playing it shows a large,
+// gently breathing Spotify logo instead.
 static void init_lyrics_screen(lv_obj_t* scr) {
     lyrics_container = lv_obj_create(scr);
     lv_obj_set_size(lyrics_container, L.scr_w, L.scr_h);
@@ -543,6 +579,7 @@ static void init_lyrics_screen(lv_obj_t* scr) {
     lv_image_set_src(spotify_big_img, &spotify_big_dsc);
     lv_obj_center(spotify_big_img);
     lv_obj_add_flag(spotify_big_img, LV_OBJ_FLAG_HIDDEN);
+    start_spotify_pulse(spotify_big_img);   // gentle breathing while idle
 
     lv_obj_add_flag(lyrics_container, LV_OBJ_FLAG_HIDDEN);
 }
