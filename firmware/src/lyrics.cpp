@@ -103,7 +103,10 @@ static uint32_t playback_pos_ms(void) {
 }
 
 bool lyrics_available(void) {
-    return g_have_header && g_n_received > 0;
+    // True as soon as the header arrives — the lines stream in over the next
+    // fraction of a second, and we must not bounce to the gif in that gap.
+    // The renderer shows the track name with a placeholder line until lines land.
+    return g_have_header;
 }
 
 bool lyrics_is_playing(void) {

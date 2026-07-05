@@ -17,25 +17,19 @@ RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
 DEVICE_NAME  = "Clawdmeter"
 
 TRACK_ID = 3735928559  # 0xDEADBEEF-ish; any stable int
-SONG = ("This Love", "Maroon 5", [
-    (20330, "I was so high, I did not recognize"),
-    (23980, "The fire burning in her eyes"),
-    (26560, "The chaos that controlled my mind"),
-    (30520, "Whispered goodbye as she got on a plane"),
-    (34170, "Never to return again but always in my heart, oh"),
-    (41020, "This love has taken its toll on me"),
-    (45360, "She said goodbye too many times before"),
-    (50900, "And her heart is breakin' in front of me"),
-    (55470, "And I have no choice"),
-    (57730, "'Cause I won't say goodbye anymore"),
-    (71190, "I tried my best to feed her appetite"),
-    (74530, "Keep her coming every night"),
-    (76930, "So hard to keep her satisfied, oh"),
-    (80870, "Kept playing love like it was just a game"),
-    (84320, "Pretending to feel the same"),
-    (86930, "Then turn around and leave again, but uh-oh"),
-    (91539, "This love has taken its toll on me"),
-    (95830, "She said goodbye too many times before"),
+# A visibly different song from the serial demo (This Love), so a successful
+# render unambiguously proves the lyrics arrived over BLE.
+SONG = ("Bohemian Rhapsody", "Queen", [
+    (670,   "Is this the real life? Is this just fantasy?"),
+    (7710,  "Caught in a landslide, no escape from reality"),
+    (15150, "Open your eyes, look up to the skies and see"),
+    (25680, "I'm just a poor boy, I need no sympathy"),
+    (31530, "Because I'm easy come, easy go, little high, little low"),
+    (38590, "Any way the wind blows doesn't really matter to me, to me"),
+    (55950, "Mama, just killed a man"),
+    (62460, "Put a gun against his head, pulled my trigger, now he's dead"),
+    (71000, "Mama, life had just begun"),
+    (77000, "But now I've gone and thrown it all away"),
 ])
 
 
