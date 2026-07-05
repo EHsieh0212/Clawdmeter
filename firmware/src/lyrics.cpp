@@ -88,9 +88,10 @@ void lyrics_ingest_pos(uint32_t id, uint32_t ms, bool playing) {
 }
 
 void lyrics_ingest_none(void) {
-    // Host reports nothing playing → drop out of the lyrics view.
+    // Host reports paused / nothing playing → show the idle logo, but KEEP the
+    // buffered lyrics. Resuming the same track only sends a position update (no
+    // re-push), so clearing here would leave nothing to display on resume.
     g_playing = false;
-    g_have_header = false;
 }
 
 // --- Query ------------------------------------------------------------------
@@ -166,7 +167,7 @@ void lyrics_load_demo(void) {
         { 138280, "Because I know that's what you want me to do" },
     };
     const int n = (int)(sizeof(S) / sizeof(S[0]));
-    const uint32_t id = 0xDEADBEEF;
+    const uint32_t id = LYRICS_DEMO_ID;
     lyrics_ingest_header(id, n, "This Love", "Maroon 5");
     for (int i = 0; i < n; i++)
         lyrics_ingest_line(id, i, S[i].ms, S[i].text);

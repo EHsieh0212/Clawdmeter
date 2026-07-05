@@ -13,6 +13,7 @@
 #define LYRICS_MAX_LINES 96
 #define LYRICS_MAX_LINE  100   // bytes per line incl. NUL
 #define LYRICS_MAX_NAME  64    // bytes for track / artist incl. NUL
+#define LYRICS_DEMO_ID   0xDEADBEEF   // track id used by lyrics_load_demo()
 
 void lyrics_init(void);
 void lyrics_tick(void);

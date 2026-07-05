@@ -230,8 +230,11 @@ static void check_serial_cmd() {
                 lyrics_load_demo();
                 ui_show_screen(SCREEN_LYRICS);
             }
-            else if (strcmp(cmd_buf, "lyrstop") == 0) {   // simulate playback stop
+            else if (strcmp(cmd_buf, "lyrstop") == 0) {   // simulate pause
                 lyrics_ingest_none();
+            }
+            else if (strcmp(cmd_buf, "lyrplay") == 0) {   // simulate resume (pos only, no re-push)
+                lyrics_ingest_pos(LYRICS_DEMO_ID, 45000, true);
             }
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {

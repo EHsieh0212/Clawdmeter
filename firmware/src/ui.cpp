@@ -579,7 +579,7 @@ static void lyrics_render(void) {
     const char* cur  = (idx >= 0)     ? lyrics_line(idx)     : "";
     const char* next = lyrics_line(idx + 1);
     lv_label_set_text(lbl_lyr_prev, prev ? prev : "");
-    lv_label_set_text(lbl_lyr_cur,  (cur && cur[0]) ? cur : "\xC2\xB7");
+    lv_label_set_text(lbl_lyr_cur,  (cur && cur[0]) ? cur : "");   // empty before the first line
     lv_label_set_text(lbl_lyr_next, next ? next : "");
 }
 
