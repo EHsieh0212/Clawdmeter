@@ -52,7 +52,7 @@ SCOPE         = "user-read-currently-playing user-read-playback-state"
 TOKEN_FILE    = Path.home() / ".config/claude-usage-monitor/spotify-token.json"
 UA            = "clawdmeter-lyrics/0.1"
 
-POLL_SECONDS  = 5.0
+POLL_SECONDS  = 2.0   # how often to poll Spotify; lower = lyrics appear sooner
 
 
 def log(m):
